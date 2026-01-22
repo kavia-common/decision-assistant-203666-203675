@@ -573,6 +573,30 @@
 .chartBar { fill: url(#grad); }
 .chartBar { fill: rgba(59, 130, 246, 0.9); }
 
+/* Sensitivity analysis */
+.sensitivityControls {
+  display: grid;
+  grid-template-columns: 1fr 160px 220px;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+.sensitivityGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+.sensitivityChanges {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sensitivityCellChanged {
+  background: rgba(59, 130, 246, 0.08);
+  font-weight: 900;
+}
+
 .explain { display: flex; flex-direction: column; gap: 10px; }
 .explainRow {
   display: flex;
@@ -604,6 +628,8 @@
   .grid { grid-template-columns: 1fr; }
   .listRow { grid-template-columns: 1fr 1fr 40px; }
   .optionRow { grid-template-columns: 1fr 80px 40px; }
+  .sensitivityControls { grid-template-columns: 1fr; }
+  .sensitivityGrid { grid-template-columns: 1fr; }
 }
 @media (max-width: 520px) {
   .topbar { height: auto; padding: 12px; align-items: flex-start; }

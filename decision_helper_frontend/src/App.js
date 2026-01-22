@@ -116,6 +116,79 @@ function rankOptions(decision) {
     });
 }
 
+/**
+ * Create a decision copy with the same data, but replace criteria weights from a map.
+ * This allows sensitivity analysis to reuse the existing scoring/ranking logic unchanged.
+ */
+function applyWeightOverrides(decision, overridesByCriterionId) {
+  const nextCriteria = (decision.criteria || []).map((c) => ({
+    ...c,
+    weight:
+      overridesByCriterionId && Object.prototype.hasOwnProperty.call(overridesByCriterionId, c.id)
+        ? overridesByCriterionId[c.id]
+        : c.weight,
+  }));
+  return { ...decision, criteria: nextCriteria };
+}
+
+/**
+ * Compute sensitivity for varying one criterion's weight from MIN_WEIGHT..MAX_WEIGHT while keeping
+ * other weights constant.
+ *
+ * Result includes:
+ * - baselineRankByOptionId: current rank for each option (1..n)
+ * - points: per-weight result with rank changes
+ */
+function computeSensitivityOneCriterion(decision, criterionId, step = 1) {
+  const crit = (decision.criteria || []).find((c) => c.id === criterionId);
+  if (!crit) return null;
+
+  const baseline = rankOptions(decision);
+  const baselineRankByOptionId = {};
+  baseline.forEach((r, idx) => {
+    baselineRankByOptionId[r.optionId] = idx + 1;
+  });
+
+  const points = [];
+  for (let w = MIN_WEIGHT; w <= MAX_WEIGHT; w += step) {
+    const overriddenDecision = applyWeightOverrides(decision, { [criterionId]: w });
+    const ranked = rankOptions(overriddenDecision);
+    const rankByOptionId = {};
+    ranked.forEach((r, idx) => {
+      rankByOptionId[r.optionId] = idx + 1;
+    });
+
+    const top = ranked[0];
+    points.push({
+      weight: w,
+      topOptionId: top?.optionId || null,
+      topOptionName: top?.option?.name || "",
+      rankByOptionId,
+    });
+  }
+
+  // Summaries: how many times each option becomes #1, and max rank movement vs baseline.
+  const winCountByOptionId = {};
+  const maxDeltaByOptionId = {};
+  for (const p of points) {
+    if (p.topOptionId) winCountByOptionId[p.topOptionId] = (winCountByOptionId[p.topOptionId] || 0) + 1;
+    for (const [optionId, rankNow] of Object.entries(p.rankByOptionId)) {
+      const baseRank = baselineRankByOptionId[optionId] ?? null;
+      if (!baseRank) continue;
+      const delta = Math.abs(rankNow - baseRank);
+      maxDeltaByOptionId[optionId] = Math.max(maxDeltaByOptionId[optionId] || 0, delta);
+    }
+  }
+
+  return {
+    criterion: crit,
+    baselineRankByOptionId,
+    points,
+    winCountByOptionId,
+    maxDeltaByOptionId,
+  };
+}
+
 /** Create a starter decision */
 function createDecision(name = "New Decision") {
   const c1 = { id: uid(), name: "Cost", weight: 4 };
@@ -263,11 +336,15 @@ function App() {
   const [theme, setTheme] = useState(loaded.theme || "light");
   const [decisions, setDecisions] = useState(loaded.decisions || []);
   const [activeDecisionId, setActiveDecisionId] = useState(loaded.activeDecisionId || null);
-  const [activeTab, setActiveTab] = useState("workspace"); // workspace | charts | notes
+  const [activeTab, setActiveTab] = useState("workspace"); // workspace | charts | sensitivity
   const [toast, setToast] = useState(null);
 
   const [notesModal, setNotesModal] = useState(null); // { optionId }
   const [exportModalOpen, setExportModalOpen] = useState(false);
+
+  // Sensitivity controls (UI-only state; does not modify the decision)
+  const [sensitivityCriterionId, setSensitivityCriterionId] = useState(null);
+  const [sensitivityStep, setSensitivityStep] = useState(1);
 
   const toastTimerRef = useRef(null);
 
@@ -277,6 +354,22 @@ function App() {
   );
 
   const ranking = useMemo(() => (activeDecision ? rankOptions(activeDecision) : []), [activeDecision]);
+
+  // Keep a valid sensitivity criterion selected when decision changes / criteria changes.
+  useEffect(() => {
+    if (!activeDecision) {
+      setSensitivityCriterionId(null);
+      return;
+    }
+    const crits = activeDecision.criteria || [];
+    if (crits.length === 0) {
+      setSensitivityCriterionId(null);
+      return;
+    }
+    if (!sensitivityCriterionId || !crits.some((c) => c.id === sensitivityCriterionId)) {
+      setSensitivityCriterionId(crits[0].id);
+    }
+  }, [activeDecision, sensitivityCriterionId]);
 
   // Apply theme
   useEffect(() => {
@@ -438,6 +531,30 @@ function App() {
     }));
   }, [ranking]);
 
+  const sensitivityResult = useMemo(() => {
+    if (!activeDecision) return null;
+    if ((activeDecision.criteria || []).length === 0) return null;
+    if ((activeDecision.options || []).length === 0) return null;
+    if (!sensitivityCriterionId) return null;
+
+    const step = clamp(toNumber(sensitivityStep, 1), 1, 5);
+    return computeSensitivityOneCriterion(activeDecision, sensitivityCriterionId, step);
+  }, [activeDecision, sensitivityCriterionId, sensitivityStep]);
+
+  const sensitivityTopChanges = useMemo(() => {
+    if (!sensitivityResult) return [];
+    const pts = sensitivityResult.points || [];
+    const changes = [];
+    let prevTop = null;
+    for (const p of pts) {
+      if (p.topOptionId !== prevTop) {
+        changes.push({ weight: p.weight, topOptionId: p.topOptionId, topOptionName: p.topOptionName });
+        prevTop = p.topOptionId;
+      }
+    }
+    return changes;
+  }, [sensitivityResult]);
+
   return (
     <div className="App">
       <div className="topbar">
@@ -528,9 +645,7 @@ function App() {
           )}
 
           <div className="sidebarFooter">
-            <div className="hint">
-              Data is stored locally in your browser (LocalStorage). Nothing is sent to a server.
-            </div>
+            <div className="hint">Data is stored locally in your browser (LocalStorage). Nothing is sent to a server.</div>
           </div>
         </aside>
 
@@ -584,6 +699,14 @@ function App() {
                     aria-selected={activeTab === "charts"}
                   >
                     Charts
+                  </button>
+                  <button
+                    className={`tab ${activeTab === "sensitivity" ? "active" : ""}`}
+                    onClick={() => setActiveTab("sensitivity")}
+                    role="tab"
+                    aria-selected={activeTab === "sensitivity"}
+                  >
+                    Sensitivity
                   </button>
                 </div>
               </div>
@@ -721,10 +844,7 @@ function App() {
                     </div>
 
                     {(activeDecision.criteria || []).length === 0 || (activeDecision.options || []).length === 0 ? (
-                      <EmptyState
-                        title="Add criteria and options to score"
-                        description="You need at least 1 criterion and 1 option to compute rankings."
-                      />
+                      <EmptyState title="Add criteria and options to score" description="You need at least 1 criterion and 1 option to compute rankings." />
                     ) : (
                       <div className="tableWrap" role="region" aria-label="Comparison scoring table">
                         <table className="table">
@@ -807,9 +927,7 @@ function App() {
                               </div>
                               <div>
                                 <div className="rankingName">{r.option?.name || "Option"}</div>
-                                <div className="rankingMeta">
-                                  {(activeDecision.criteria || []).length} criteria · weighted score
-                                </div>
+                                <div className="rankingMeta">{(activeDecision.criteria || []).length} criteria · weighted score</div>
                               </div>
                             </div>
                             <div className="rankingRight">
@@ -824,7 +942,7 @@ function App() {
                     )}
                   </section>
                 </div>
-              ) : (
+              ) : activeTab === "charts" ? (
                 <div className="grid">
                   <section className="card wide" aria-label="Charts">
                     <div className="cardHeader">
@@ -878,6 +996,215 @@ function App() {
                         </div>
                       </div>
                     </div>
+                  </section>
+                </div>
+              ) : (
+                <div className="grid">
+                  <section className="card wide" aria-label="Sensitivity analysis">
+                    <div className="cardHeader">
+                      <div>
+                        <div className="cardTitle">Sensitivity analysis</div>
+                        <div className="cardSub">
+                          Vary one criterion’s weight from {MIN_WEIGHT} to {MAX_WEIGHT} and see how rankings change (other weights stay the same).
+                        </div>
+                      </div>
+                      <div className="cardHeaderActions">
+                        <button className="btn btnSmall btnGhost" onClick={() => setActiveTab("workspace")}>
+                          Back to workspace
+                        </button>
+                      </div>
+                    </div>
+
+                    {(activeDecision.criteria || []).length === 0 || (activeDecision.options || []).length === 0 ? (
+                      <EmptyState title="Not enough data" description="Add at least 1 criterion and 1 option to run sensitivity analysis." />
+                    ) : (
+                      <>
+                        <div className="sensitivityControls" role="group" aria-label="Sensitivity controls">
+                          <div className="field" style={{ marginBottom: 0 }}>
+                            <label className="label" htmlFor="sens-criterion">
+                              Criterion to vary
+                            </label>
+                            <select
+                              id="sens-criterion"
+                              className="input"
+                              value={sensitivityCriterionId || ""}
+                              onChange={(e) => setSensitivityCriterionId(e.target.value)}
+                              aria-label="Select criterion to vary"
+                            >
+                              {(activeDecision.criteria || []).map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name || "Criterion"}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="field" style={{ marginBottom: 0 }}>
+                            <label className="label" htmlFor="sens-step">
+                              Step size
+                            </label>
+                            <select
+                              id="sens-step"
+                              className="input"
+                              value={sensitivityStep}
+                              onChange={(e) => setSensitivityStep(toNumber(e.target.value, 1))}
+                              aria-label="Sensitivity step size"
+                            >
+                              <option value={1}>1</option>
+                              <option value={2}>2</option>
+                              <option value={5}>5</option>
+                            </select>
+                          </div>
+
+                          <div className="field" style={{ marginBottom: 0 }}>
+                            <label className="label">Current weight</label>
+                            <div className="readonly">
+                              {(() => {
+                                const c = (activeDecision.criteria || []).find((x) => x.id === sensitivityCriterionId);
+                                const w = clamp(toNumber(c?.weight, 0), MIN_WEIGHT, MAX_WEIGHT);
+                                return `${w} (baseline)`;
+                              })()}
+                            </div>
+                          </div>
+                        </div>
+
+                        {!sensitivityResult ? (
+                          <EmptyState title="Select a criterion" description="Choose which criterion weight you want to vary." />
+                        ) : (
+                          <div className="sensitivityGrid">
+                            <div className="card" style={{ boxShadow: "none" }} aria-label="Summary">
+                              <div className="cardHeader">
+                                <div>
+                                  <div className="cardTitle">Summary</div>
+                                  <div className="cardSub">How often each option becomes #1, and max rank movement from baseline.</div>
+                                </div>
+                              </div>
+
+                              <div className="tableWrap" role="region" aria-label="Sensitivity summary table">
+                                <table className="table" style={{ minWidth: 520 }}>
+                                  <thead>
+                                    <tr>
+                                      <th>Option</th>
+                                      <th>#1 count</th>
+                                      <th>Max rank change</th>
+                                      <th>Baseline rank</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {(activeDecision.options || [])
+                                      .map((o) => {
+                                        const baselineRank = sensitivityResult.baselineRankByOptionId[o.id] ?? null;
+                                        const wins = sensitivityResult.winCountByOptionId[o.id] || 0;
+                                        const maxDelta = sensitivityResult.maxDeltaByOptionId[o.id] || 0;
+                                        return { option: o, baselineRank, wins, maxDelta };
+                                      })
+                                      .sort((a, b) => {
+                                        // Sort by most wins, then baseline rank.
+                                        if (b.wins !== a.wins) return b.wins - a.wins;
+                                        if ((a.baselineRank || 999) !== (b.baselineRank || 999)) return (a.baselineRank || 999) - (b.baselineRank || 999);
+                                        return (a.option.name || "").localeCompare(b.option.name || "");
+                                      })
+                                      .map((row) => (
+                                        <tr key={row.option.id}>
+                                          <td>
+                                            <div className="cellOptionName">{row.option.name || "Option"}</div>
+                                          </td>
+                                          <td>{row.wins}</td>
+                                          <td>{row.maxDelta}</td>
+                                          <td>{row.baselineRank ?? "—"}</td>
+                                        </tr>
+                                      ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            <div className="card" style={{ boxShadow: "none" }} aria-label="When the winner changes">
+                              <div className="cardHeader">
+                                <div>
+                                  <div className="cardTitle">Winner changes</div>
+                                  <div className="cardSub">Points where the top-ranked option changes as weight varies.</div>
+                                </div>
+                              </div>
+
+                              {sensitivityTopChanges.length === 0 ? (
+                                <EmptyState title="No changes detected" description="The same option stays #1 across the tested range." />
+                              ) : (
+                                <div className="sensitivityChanges">
+                                  {sensitivityTopChanges.map((c, idx) => (
+                                    <div key={`${c.weight}_${c.topOptionId || idx}`} className="rankingRow" style={{ background: "rgba(59, 130, 246, 0.04)" }}>
+                                      <div className="rankingLeft">
+                                        <div className="rankBadge" aria-label={`Change ${idx + 1}`}>
+                                          {idx + 1}
+                                        </div>
+                                        <div>
+                                          <div className="rankingName">{c.topOptionName || "—"}</div>
+                                          <div className="rankingMeta">Becomes #1 at weight = {c.weight}</div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="card wide" style={{ boxShadow: "none" }} aria-label="Rank table over weight range">
+                              <div className="cardHeader">
+                                <div>
+                                  <div className="cardTitle">Rankings over weight range</div>
+                                  <div className="cardSub">Rows are tested weights; cells show rank (1 = best) for each option.</div>
+                                </div>
+                              </div>
+
+                              <div className="tableWrap" role="region" aria-label="Sensitivity ranks by weight table">
+                                <table className="table">
+                                  <thead>
+                                    <tr>
+                                      <th className="stickyCol">Weight</th>
+                                      {(activeDecision.options || []).map((o) => (
+                                        <th key={o.id}>
+                                          <div className="thTop">{o.name || "Option"}</div>
+                                          <div className="thSub">baseline #{sensitivityResult.baselineRankByOptionId[o.id] ?? "—"}</div>
+                                        </th>
+                                      ))}
+                                      <th>Winner</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {sensitivityResult.points.map((p) => (
+                                      <tr key={p.weight}>
+                                        <td className="stickyCol">
+                                          <div className="cellOptionName">{p.weight}</div>
+                                        </td>
+                                        {(activeDecision.options || []).map((o) => {
+                                          const rankNow = p.rankByOptionId[o.id] ?? null;
+                                          const baseRank = sensitivityResult.baselineRankByOptionId[o.id] ?? null;
+                                          const changed = baseRank && rankNow && baseRank !== rankNow;
+                                          return (
+                                            <td key={o.id} className={changed ? "sensitivityCellChanged" : ""} title={changed ? `Baseline #${baseRank} → #${rankNow}` : `Rank #${rankNow}`}>
+                                              {rankNow ?? "—"}
+                                            </td>
+                                          );
+                                        })}
+                                        <td>
+                                          <span className="totalPill" style={{ fontSize: 12, padding: "6px 10px" }}>
+                                            {p.topOptionName || "—"}
+                                          </span>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+
+                              <div className="hint" style={{ marginTop: 10 }}>
+                                Tip: If nothing changes, your scores may be far apart or weights too similar. Try adjusting scores/weights, then revisit this tab.
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </section>
                 </div>
               )}
@@ -961,7 +1288,11 @@ function App() {
         </Modal>
       ) : null}
 
-      {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
+      {toast ? (
+        <div className="toast" role="status" aria-live="polite">
+          {toast}
+        </div>
+      ) : null}
     </div>
   );
 }
