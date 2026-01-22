@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
+import { createDecisionFromTemplate, getDecisionTemplates } from "./decisionTemplates";
 
 /**
  * Decision Helper (client-side only)
@@ -342,6 +343,12 @@ function App() {
   const [notesModal, setNotesModal] = useState(null); // { optionId }
   const [exportModalOpen, setExportModalOpen] = useState(false);
 
+  // Template picker
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("simple-weighted");
+  const [newDecisionName, setNewDecisionName] = useState("");
+  const templates = useMemo(() => getDecisionTemplates(), []);
+
   // Sensitivity controls (UI-only state; does not modify the decision)
   const [sensitivityCriterionId, setSensitivityCriterionId] = useState(null);
   const [sensitivityStep, setSensitivityStep] = useState(1);
@@ -404,11 +411,27 @@ function App() {
   };
 
   const addDecision = () => {
+    // Quick create (keeps previous behavior)
     const d = createDecision(`Decision ${decisions.length + 1}`);
     setDecisions((prev) => [d, ...prev]);
     setActiveDecisionId(d.id);
     setActiveTab("workspace");
     showToast("Decision created");
+  };
+
+  const openTemplatePicker = () => {
+    setSelectedTemplateId("simple-weighted");
+    setNewDecisionName(`Decision ${decisions.length + 1}`);
+    setTemplateModalOpen(true);
+  };
+
+  const createFromTemplate = () => {
+    const d = createDecisionFromTemplate(selectedTemplateId, newDecisionName);
+    setDecisions((prev) => [d, ...prev]);
+    setActiveDecisionId(d.id);
+    setActiveTab("workspace");
+    setTemplateModalOpen(false);
+    showToast("Decision created from template");
   };
 
   const deleteDecision = (decisionId) => {
@@ -575,8 +598,8 @@ function App() {
           <button className="btn btnGhost" onClick={resetActiveDecision} disabled={!activeDecision}>
             Reset scores
           </button>
-          <button className="btn btnPrimary" onClick={addDecision}>
-            New decision
+          <button className="btn btnPrimary" onClick={openTemplatePicker}>
+            New from template
           </button>
           <button className="btn btnGhost" onClick={toggleTheme} aria-label={`Switch to ${theme === "light" ? "dark" : "light"} mode`}>
             {theme === "light" ? "Dark" : "Light"}
@@ -598,8 +621,8 @@ function App() {
               title="No decisions yet"
               description="Create your first decision to start comparing options."
               action={
-                <button className="btn btnPrimary" onClick={addDecision}>
-                  Create decision
+                <button className="btn btnPrimary" onClick={openTemplatePicker}>
+                  Create from template
                 </button>
               }
             />
@@ -656,8 +679,8 @@ function App() {
                 title="Select a decision"
                 description="Choose a decision from the left or create a new one."
                 action={
-                  <button className="btn btnPrimary" onClick={addDecision}>
-                    New decision
+                  <button className="btn btnPrimary" onClick={openTemplatePicker}>
+                    New from template
                   </button>
                 }
               />
@@ -1285,6 +1308,67 @@ function App() {
               <pre className="codeBlock">{exportActiveDecision()}</pre>
             </div>
           )}
+        </Modal>
+      ) : null}
+
+      {templateModalOpen ? (
+        <Modal
+          title="New decision from template"
+          onClose={() => setTemplateModalOpen(false)}
+          footer={
+            <div className="modalFooterRow">
+              <button className="btn btnGhost" onClick={() => setTemplateModalOpen(false)}>
+                Cancel
+              </button>
+              <button className="btn btnPrimary" onClick={createFromTemplate}>
+                Create decision
+              </button>
+            </div>
+          }
+        >
+          <div className="modalForm">
+            <div className="field">
+              <label className="label" htmlFor="template-name">
+                Decision name
+              </label>
+              <input
+                id="template-name"
+                className="input"
+                value={newDecisionName}
+                onChange={(e) => setNewDecisionName(e.target.value)}
+                placeholder="e.g. Choose a vendor"
+                aria-label="Decision name"
+                autoFocus
+              />
+            </div>
+
+            <div className="field">
+              <label className="label" htmlFor="template-select">
+                Template
+              </label>
+              <select
+                id="template-select"
+                className="input"
+                value={selectedTemplateId}
+                onChange={(e) => setSelectedTemplateId(e.target.value)}
+                aria-label="Select a decision template"
+              >
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+
+              <div className="hint" style={{ marginTop: 6 }}>
+                {templates.find((t) => t.id === selectedTemplateId)?.description || ""}
+              </div>
+            </div>
+
+            <div className="hint">
+              Templates are applied locally. Your existing decisions remain unchanged, and everything is still saved to LocalStorage.
+            </div>
+          </div>
         </Modal>
       ) : null}
 
